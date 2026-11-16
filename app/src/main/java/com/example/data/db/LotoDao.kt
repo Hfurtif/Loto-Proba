@@ -88,4 +88,21 @@ interface LotoDao {
 
     @Query("DELETE FROM proposed_combinations WHERE sourceId = :sourceId AND targetDateString = :targetDateString")
     suspend fun deleteCombinationsForDate(sourceId: String, targetDateString: String)
+
+    // --- AiEvaluationRecord queries ---
+
+    @Query("SELECT * FROM ai_evaluations WHERE sourceId = :sourceId ORDER BY timestamp DESC")
+    fun getAllAiEvaluationsFlow(sourceId: String): Flow<List<com.example.data.model.AiEvaluationRecord>>
+
+    @Query("SELECT * FROM ai_evaluations WHERE sourceId = :sourceId ORDER BY timestamp DESC LIMIT 1")
+    suspend fun getLatestAiEvaluation(sourceId: String): com.example.data.model.AiEvaluationRecord?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAiEvaluation(record: com.example.data.model.AiEvaluationRecord): Long
+
+    @Update
+    suspend fun updateAiEvaluation(record: com.example.data.model.AiEvaluationRecord)
+
+    @Delete
+    suspend fun deleteAiEvaluation(record: com.example.data.model.AiEvaluationRecord)
 }

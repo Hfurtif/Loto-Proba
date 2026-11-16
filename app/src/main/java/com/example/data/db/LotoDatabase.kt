@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import com.example.data.model.AiEvaluationRecord
 import com.example.data.model.LotoDraw
 import com.example.data.model.LotoSource
 import com.example.data.model.ProposedCombination
@@ -12,9 +13,10 @@ import com.example.data.model.ProposedCombination
     entities = [
         LotoDraw::class,
         LotoSource::class,
-        ProposedCombination::class
+        ProposedCombination::class,
+        AiEvaluationRecord::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class LotoDatabase : RoomDatabase() {

@@ -22,6 +22,10 @@ class LotoRepository(
     fun getDrawsFlow(sourceId: String): Flow<List<LotoDraw>> =
         lotoDao.getDrawsBySourceFlow(sourceId)
 
+    suspend fun getStoredDraws(sourceId: String): List<LotoDraw> = withContext(Dispatchers.IO) {
+        lotoDao.getDrawsBySource(sourceId)
+    }
+
     fun getEvaluatedCombinationsFlow(sourceId: String): Flow<List<ProposedCombination>> =
         lotoDao.getEvaluatedCombinationsFlow(sourceId)
 
@@ -215,5 +219,26 @@ class LotoRepository(
         val draws = SampleDataGenerator.generateHistoricalDraws(sourceId, count = 90)
         lotoDao.insertDraws(draws)
         generateSamplePastPropositions(sourceId, draws)
+    }
+
+    // --- Intelligence Artificielle & Évaluations ---
+
+    fun getAiEvaluationsFlow(sourceId: String): Flow<List<com.example.data.model.AiEvaluationRecord>> =
+        lotoDao.getAllAiEvaluationsFlow(sourceId)
+
+    suspend fun getLatestAiEvaluation(sourceId: String): com.example.data.model.AiEvaluationRecord? = withContext(Dispatchers.IO) {
+        lotoDao.getLatestAiEvaluation(sourceId)
+    }
+
+    suspend fun saveAiEvaluation(record: com.example.data.model.AiEvaluationRecord): Long = withContext(Dispatchers.IO) {
+        lotoDao.insertAiEvaluation(record)
+    }
+
+    suspend fun updateAiEvaluation(record: com.example.data.model.AiEvaluationRecord) = withContext(Dispatchers.IO) {
+        lotoDao.updateAiEvaluation(record)
+    }
+
+    suspend fun deleteAiEvaluation(record: com.example.data.model.AiEvaluationRecord) = withContext(Dispatchers.IO) {
+        lotoDao.deleteAiEvaluation(record)
     }
 }

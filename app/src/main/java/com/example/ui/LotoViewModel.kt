@@ -10,14 +10,19 @@ import com.example.data.model.ProposedCombination
 import com.example.data.network.ImportReport
 import com.example.data.repository.LotoRepository
 import com.example.stats.ChiSquareResult
+import com.example.stats.GapAndColdAnalysis
 import com.example.stats.GeneratedCombination
 import com.example.stats.LotoStatsCalculator
 import com.example.stats.DailyNapPackage
 import com.example.stats.NapItem
+import com.example.stats.NumberFrequency
+import com.example.stats.NumberGapStat
 import com.example.stats.NumberStat
 import com.example.stats.PairStat
+import com.example.stats.PairsAndTriosAnalysis
 import com.example.stats.TrackingSummary
 import com.example.stats.TrioStat
+import com.example.stats.UserNumbersAnalysis
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -31,20 +36,18 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
 
+import com.example.data.api.ApiKeyManager
+import com.example.data.api.GeminiLotoService
+import com.example.data.model.AiEvaluationRecord
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class LotoViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val repository: LotoRepository
-
-    init {
-        val database = LotoDatabase.getDatabase(application)
-        repository = LotoRepository(database.lotoDao())
-        viewModelScope.launch {
-            repository.initializeIfEmpty(application)
-        }
-    }
+    private val repository: LotoRepository =
+        LotoRepository(LotoDatabase.getDatabase(application).lotoDao())
+    val apiKeyManager = ApiKeyManager(application)
+    private val aiService = GeminiLotoService(apiKeyManager)
 
     // Sources
     val sources: StateFlow<List<LotoSource>> = repository.allSources
@@ -100,26 +103,130 @@ class LotoViewModel(application: Application) : AndroidViewModel(application) {
     val showAddDrawDialog = MutableStateFlow(false)
     val editingSource = MutableStateFlow<LotoSource?>(null)
 
+    // États de l'Intelligence Artificielle (IA)
+    private val _customApiKey = MutableStateFlow(apiKeyManager.getCustomApiKey())
+    val customApiKey: StateFlow<String> = _customApiKey.asStateFlow()
+    val isApiKeyConfigured = MutableStateFlow(apiKeyManager.isKeyConfigured())
+    val isAiGenerating = MutableStateFlow(false)
+    val isAiEvaluating = MutableStateFlow(false)
+
+    val aiEvaluations: StateFlow<List<AiEvaluationRecord>> = _selectedSourceId.flatMapLatest { sourceId ->
+        repository.getAiEvaluationsFlow(sourceId)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val latestAiPrediction: StateFlow<AiEvaluationRecord?> = aiEvaluations.map { list ->
+        list.firstOrNull()
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
     // Statistiques calculées réactivement
     val numberStats: StateFlow<List<NumberStat>> = draws.combine(_selectedSourceId) { list, _ ->
         LotoStatsCalculator.calculateNumberStats(list)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    val topPairs: StateFlow<List<PairStat>> = draws.combine(_selectedSourceId) { list, _ ->
-        LotoStatsCalculator.calculateTopPairs(list, limit = 10)
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    private val _numberFrequencies01To90 = MutableStateFlow(
+        LotoStatsCalculator.calculateNumberFrequencies01To90(emptyList())
+    )
+    val numberFrequencies01To90: StateFlow<List<NumberFrequency>> =
+        _numberFrequencies01To90.asStateFlow()
 
-    val topTrios: StateFlow<List<TrioStat>> = draws.combine(_selectedSourceId) { list, _ ->
-        LotoStatsCalculator.calculateTopTrios(list, limit = 10)
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
-
-    val chiSquareResult: StateFlow<ChiSquareResult> = draws.combine(_selectedSourceId) { list, _ ->
-        LotoStatsCalculator.calculateChiSquareTest(list)
+    val frequencyMap01To90: StateFlow<Map<String, Int>> = _numberFrequencies01To90.map { list ->
+        list.associate { it.formattedNumber to it.count }
     }.stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(5000),
+        (1..90).associate { it.toString().padStart(2, '0') to 0 }
+    )
+
+    private val _pairTrioLimit = MutableStateFlow(10)
+    val pairTrioLimit: StateFlow<Int> = _pairTrioLimit.asStateFlow()
+
+    private val _pairsAndTriosAnalysis = MutableStateFlow(
+        PairsAndTriosAnalysis(
+            totalDrawsAnalyzed = 0,
+            topPairs = emptyList(),
+            topTrios = emptyList()
+        )
+    )
+    val pairsAndTriosAnalysis: StateFlow<PairsAndTriosAnalysis> =
+        _pairsAndTriosAnalysis.asStateFlow()
+
+    private val _recentWindowSize = MutableStateFlow(30)
+    val recentWindowSize: StateFlow<Int> = _recentWindowSize.asStateFlow()
+
+    private val _gapTopLimit = MutableStateFlow(10)
+
+    private val _gapAndColdAnalysis = MutableStateFlow(
+        LotoStatsCalculator.calculateNumberGapsAndLeastRecent(emptyList())
+    )
+    val gapAndColdAnalysis: StateFlow<GapAndColdAnalysis> =
+        _gapAndColdAnalysis.asStateFlow()
+
+    val numberGaps: StateFlow<List<NumberGapStat>> = gapAndColdAnalysis.map { it.numberGaps }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val gapByNumberMap: StateFlow<Map<Int, Int>> = gapAndColdAnalysis.map { analysis ->
+        analysis.numberGaps.associate { it.number to it.drawsSinceLastAppearance }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
+
+    val highestGapNumbers: StateFlow<List<NumberGapStat>> = gapAndColdAnalysis.map { it.longestGaps }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val leastRecentlyDrawnNumbers: StateFlow<List<NumberGapStat>> =
+        gapAndColdAnalysis.map { it.leastRecentlyDrawn }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    private val _userProposedNumbers = MutableStateFlow<List<Int>>(emptyList())
+    val userProposedNumbers: StateFlow<List<Int>> = _userProposedNumbers.asStateFlow()
+
+    private val _userNumbersAnalysis = MutableStateFlow<UserNumbersAnalysis?>(null)
+    val userNumbersAnalysis: StateFlow<UserNumbersAnalysis?> = _userNumbersAnalysis.asStateFlow()
+
+    private val _userNumbersAiReport = MutableStateFlow<String?>(null)
+    val userNumbersAiReport: StateFlow<String?> = _userNumbersAiReport.asStateFlow()
+
+    val isAnalyzingUserNumbersWithAi = MutableStateFlow(false)
+
+    private val _chiSquareResult = MutableStateFlow(
         ChiSquareResult(0.0, 90, 113.145, 1.0, true, "Calcul des statistiques en cours...")
     )
+    val chiSquareResult: StateFlow<ChiSquareResult> = _chiSquareResult.asStateFlow()
+
+    init {
+        viewModelScope.launch {
+            repository.initializeIfEmpty(application)
+        }
+        viewModelScope.launch {
+            draws.collect { list ->
+                _numberFrequencies01To90.value =
+                    LotoStatsCalculator.calculateNumberFrequencies01To90(list)
+                val limit = _pairTrioLimit.value
+                _pairsAndTriosAnalysis.value =
+                    LotoStatsCalculator.analyzeTopPairsAndTrios(
+                        draws = list,
+                        pairLimit = limit,
+                        trioLimit = limit
+                    )
+                _gapAndColdAnalysis.value =
+                    LotoStatsCalculator.calculateNumberGapsAndLeastRecent(
+                        draws = list,
+                        recentWindowSize = _recentWindowSize.value,
+                        topLimit = _gapTopLimit.value
+                    )
+                _chiSquareResult.value = LotoStatsCalculator.calculateChiSquareTest(list)
+                val userNums = _userProposedNumbers.value
+                if (userNums.isNotEmpty()) {
+                    _userNumbersAnalysis.value =
+                        LotoStatsCalculator.analyzeUserProposedNumbers(userNums, list)
+                }
+            }
+        }
+    }
+
+    val topPairs: StateFlow<List<PairStat>> = pairsAndTriosAnalysis.map { it.topPairs }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val topTrios: StateFlow<List<TrioStat>> = pairsAndTriosAnalysis.map { it.topTrios }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     // Combinaisons générées dynamiquement selon les pondérations
     val generatedCombinations: StateFlow<List<GeneratedCombination>> = combine(
@@ -221,6 +328,183 @@ class LotoViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectSource(sourceId: String) {
         _selectedSourceId.value = sourceId
+    }
+
+    /**
+     * Traite une liste de tirages stockés pour calculer la fréquence
+     * de chaque numéro de 01 à 90.
+     * Retourne une Map ordonnée de "01" à "90" -> nombre d'apparitions.
+     */
+    fun processStoredDrawsFrequency(storedDraws: List<LotoDraw>): Map<String, Int> {
+        val frequencies = LotoStatsCalculator.calculateNumberFrequencies01To90(storedDraws)
+        _numberFrequencies01To90.value = frequencies
+        return frequencies.associate { it.formattedNumber to it.count }
+    }
+
+    /**
+     * Charge les tirages stockés en base Room pour la source sélectionnée
+     * et calcule la fréquence de chaque numéro de 01 à 90.
+     */
+    fun calculateNumberFrequencies01To90(sourceId: String = _selectedSourceId.value) {
+        viewModelScope.launch {
+            val storedDraws = repository.getStoredDraws(sourceId)
+            val frequencies = LotoStatsCalculator.calculateNumberFrequencies01To90(storedDraws)
+            _numberFrequencies01To90.value = frequencies
+        }
+    }
+
+    /**
+     * Analyse une liste donnée de tirages historiques pour identifier les paires
+     * et trios de numéros les plus fréquemment tirés ensemble.
+     */
+    fun processHistoricalDrawsForPairsAndTrios(
+        historicalDraws: List<LotoDraw>,
+        limit: Int = _pairTrioLimit.value
+    ): PairsAndTriosAnalysis {
+        val safeLimit = limit.coerceIn(1, 50)
+        _pairTrioLimit.value = safeLimit
+        val analysis = LotoStatsCalculator.analyzeTopPairsAndTrios(
+            draws = historicalDraws,
+            pairLimit = safeLimit,
+            trioLimit = safeLimit
+        )
+        _pairsAndTriosAnalysis.value = analysis
+        return analysis
+    }
+
+    /**
+     * Charge l'historique stocké dans Room pour la source sélectionnée et identifie
+     * les paires et trios les plus fréquemment tirés ensemble.
+     */
+    fun analyzePairsAndTriosFromHistory(
+        sourceId: String = _selectedSourceId.value,
+        limit: Int = _pairTrioLimit.value
+    ) {
+        val safeLimit = limit.coerceIn(1, 50)
+        _pairTrioLimit.value = safeLimit
+        viewModelScope.launch {
+            val storedDraws = repository.getStoredDraws(sourceId)
+            _pairsAndTriosAnalysis.value = LotoStatsCalculator.analyzeTopPairsAndTrios(
+                draws = storedDraws,
+                pairLimit = safeLimit,
+                trioLimit = safeLimit
+            )
+        }
+    }
+
+    /**
+     * Met à jour le nombre de résultats affichés (Top N) et relance l'analyse des paires et trios.
+     */
+    fun updatePairTrioLimit(limit: Int) {
+        val safeLimit = limit.coerceIn(1, 50)
+        _pairTrioLimit.value = safeLimit
+        val currentDraws = draws.value
+        if (currentDraws.isNotEmpty()) {
+            _pairsAndTriosAnalysis.value = LotoStatsCalculator.analyzeTopPairsAndTrios(
+                draws = currentDraws,
+                pairLimit = safeLimit,
+                trioLimit = safeLimit
+            )
+        } else {
+            analyzePairsAndTriosFromHistory(_selectedSourceId.value, safeLimit)
+        }
+    }
+
+    /**
+     * Calcule le nombre de tirages écoulés depuis la dernière apparition de chaque numéro (retards)
+     * et identifie les numéros les moins sortis récemment à partir d'une liste de tirages.
+     */
+    fun processHistoricalDrawsForGapsAndCold(
+        historicalDraws: List<LotoDraw>,
+        recentWindowSize: Int = _recentWindowSize.value,
+        topLimit: Int = _gapTopLimit.value
+    ): GapAndColdAnalysis {
+        val safeWindow = recentWindowSize.coerceIn(5, 180)
+        val safeLimit = topLimit.coerceIn(1, LotoStatsCalculator.TOTAL_NUMBERS)
+        _recentWindowSize.value = safeWindow
+        _gapTopLimit.value = safeLimit
+        val analysis = LotoStatsCalculator.calculateNumberGapsAndLeastRecent(
+            draws = historicalDraws,
+            recentWindowSize = safeWindow,
+            topLimit = safeLimit
+        )
+        _gapAndColdAnalysis.value = analysis
+        return analysis
+    }
+
+    /**
+     * Charge les tirages stockés dans Room pour la source sélectionnée afin de calculer
+     * les retards de chaque numéro et les numéros les moins sortis récemment.
+     */
+    fun calculateGapsAndLeastRecentFromHistory(
+        sourceId: String = _selectedSourceId.value,
+        recentWindowSize: Int = _recentWindowSize.value,
+        topLimit: Int = _gapTopLimit.value
+    ) {
+        val safeWindow = recentWindowSize.coerceIn(5, 180)
+        val safeLimit = topLimit.coerceIn(1, LotoStatsCalculator.TOTAL_NUMBERS)
+        _recentWindowSize.value = safeWindow
+        _gapTopLimit.value = safeLimit
+        viewModelScope.launch {
+            val storedDraws = repository.getStoredDraws(sourceId)
+            _gapAndColdAnalysis.value = LotoStatsCalculator.calculateNumberGapsAndLeastRecent(
+                draws = storedDraws,
+                recentWindowSize = safeWindow,
+                topLimit = safeLimit
+            )
+        }
+    }
+
+    /**
+     * Met à jour la fenêtre d'analyse récente (nombre de derniers tirages) et recalcule les retards.
+     */
+    fun updateRecentWindowSize(windowSize: Int) {
+        val safeWindow = windowSize.coerceIn(5, 180)
+        _recentWindowSize.value = safeWindow
+        val currentDraws = draws.value
+        if (currentDraws.isNotEmpty()) {
+            _gapAndColdAnalysis.value = LotoStatsCalculator.calculateNumberGapsAndLeastRecent(
+                draws = currentDraws,
+                recentWindowSize = safeWindow,
+                topLimit = _gapTopLimit.value
+            )
+        } else {
+            calculateGapsAndLeastRecentFromHistory(_selectedSourceId.value, safeWindow, _gapTopLimit.value)
+        }
+    }
+
+    /**
+     * Exécute le test d'équité du Chi-carré sur une liste de tirages pour comparer
+     * la distribution observée des numéros (0 à 90) avec la distribution théorique uniforme.
+     */
+    fun runChiSquareEquityTest(historicalDraws: List<LotoDraw>): ChiSquareResult {
+        val result = LotoStatsCalculator.calculateChiSquareTest(historicalDraws)
+        _chiSquareResult.value = result
+        return result
+    }
+
+    /**
+     * Charge l'historique des tirages stockés dans Room pour la source active et exécute
+     * le test d'équité du Chi-carré par rapport à une distribution uniforme.
+     */
+    fun runChiSquareEquityTestFromHistory(sourceId: String = _selectedSourceId.value) {
+        viewModelScope.launch {
+            val storedDraws = repository.getStoredDraws(sourceId)
+            _chiSquareResult.value = LotoStatsCalculator.calculateChiSquareTest(storedDraws)
+        }
+    }
+
+    /**
+     * Compare une distribution observée fournie (numéro 0..90 -> nombre d'apparitions)
+     * avec la distribution théorique uniforme via le test du Chi-carré.
+     */
+    fun runChiSquareEquityTestOnFrequencies(observedCountsByNumber: Map<Int, Int>): ChiSquareResult {
+        val countsArray = IntArray(LotoStatsCalculator.TOTAL_NUMBERS) { number ->
+            observedCountsByNumber[number]?.coerceAtLeast(0) ?: 0
+        }
+        val result = LotoStatsCalculator.calculateChiSquareFromObservedCounts(countsArray)
+        _chiSquareResult.value = result
+        return result
     }
 
     fun updateWeights(recent: Float, global: Float, gap: Float) {
@@ -415,5 +699,255 @@ class LotoViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearImportReport() {
         importReport.value = null
+    }
+
+    // --- Actions Intelligence Artificielle (IA) ---
+
+    fun saveCustomApiKey(key: String) {
+        apiKeyManager.setCustomApiKey(key)
+        _customApiKey.value = apiKeyManager.getCustomApiKey()
+        isApiKeyConfigured.value = apiKeyManager.isKeyConfigured()
+        snackbarMessage.value = "Clé API enregistrée avec succès !"
+    }
+
+    fun clearCustomApiKey() {
+        apiKeyManager.clearCustomApiKey()
+        _customApiKey.value = ""
+        isApiKeyConfigured.value = apiKeyManager.isKeyConfigured()
+        snackbarMessage.value = "Clé API personnalisée effacée (retour aux paramètres par défaut)."
+    }
+
+    fun generateAiPrediction() {
+        viewModelScope.launch {
+            isAiGenerating.value = true
+            try {
+                val currentSource = sources.value.find { it.id == _selectedSourceId.value }
+                val sourceName = currentSource?.name ?: "Niger Loto"
+                val result = aiService.generatePrediction(
+                    recentDraws = draws.value,
+                    numberStats = numberStats.value,
+                    topPairs = topPairs.value,
+                    sourceId = _selectedSourceId.value,
+                    sourceName = sourceName
+                )
+                result.onSuccess { record ->
+                    repository.saveAiEvaluation(record)
+                    snackbarMessage.value = "Prédiction IA générée avec succès pour le ${record.targetDate} !"
+                }.onFailure { err ->
+                    snackbarMessage.value = "Erreur IA : ${err.localizedMessage}"
+                }
+            } finally {
+                isAiGenerating.value = false
+            }
+        }
+    }
+
+    fun evaluateLatestDrawWithAi() {
+        val latestDraw = draws.value.firstOrNull()
+        if (latestDraw == null) {
+            snackbarMessage.value = "Aucun tirage disponible pour l'évaluation."
+            return
+        }
+
+        // Trouver la dernière prédiction (soit non évaluée, soit la plus récente)
+        val targetPrediction = aiEvaluations.value.firstOrNull { !it.evaluated } ?: aiEvaluations.value.firstOrNull()
+        if (targetPrediction == null) {
+            snackbarMessage.value = "Aucune prédiction IA à analyser. Générez d'abord une prédiction !"
+            return
+        }
+
+        viewModelScope.launch {
+            isAiEvaluating.value = true
+            try {
+                val result = aiService.evaluateDrawAgainstPrediction(
+                    latestDraw = latestDraw,
+                    prediction = targetPrediction,
+                    recentDraws = draws.value
+                )
+                result.onSuccess { evaluatedRecord ->
+                    repository.saveAiEvaluation(evaluatedRecord)
+                    snackbarMessage.value = "Analyse du résultat terminée !"
+                }.onFailure { err ->
+                    snackbarMessage.value = "Erreur pendant l'analyse : ${err.localizedMessage}"
+                }
+            } finally {
+                isAiEvaluating.value = false
+            }
+        }
+    }
+
+    fun deleteAiEvaluation(record: AiEvaluationRecord) {
+        viewModelScope.launch {
+            repository.deleteAiEvaluation(record)
+            snackbarMessage.value = "Rapport IA supprimé."
+        }
+    }
+
+    // --- Analyse des chiffres proposés par l'utilisateur ---
+
+    /**
+     * Analyse une sélection de 1 à 5 numéros fournie par l'utilisateur à partir
+     * des tirages fournis (ou des tirages actuellement chargés).
+     */
+    fun analyzeUserProposedNumbers(
+        numbers: List<Int>,
+        historicalDraws: List<LotoDraw> = draws.value
+    ): UserNumbersAnalysis? {
+        val valid = numbers.filter { it in 0..90 }.distinct().sorted().take(5)
+        if (valid.isEmpty()) {
+            snackbarMessage.value = "Veuillez saisir au moins 1 numéro valide entre 0 et 90."
+            return null
+        }
+        _userProposedNumbers.value = valid
+        _userNumbersAiReport.value = null
+        val analysis = LotoStatsCalculator.analyzeUserProposedNumbers(valid, historicalDraws)
+        _userNumbersAnalysis.value = analysis
+        return analysis
+    }
+
+    /**
+     * Charge les tirages stockés dans Room pour la source active et analyse la sélection utilisateur.
+     */
+    fun analyzeUserProposedNumbersFromHistory(
+        numbers: List<Int>,
+        sourceId: String = _selectedSourceId.value
+    ) {
+        val valid = numbers.filter { it in 0..90 }.distinct().sorted().take(5)
+        if (valid.isEmpty()) {
+            snackbarMessage.value = "Veuillez saisir au moins 1 numéro valide entre 0 et 90."
+            return
+        }
+        _userProposedNumbers.value = valid
+        _userNumbersAiReport.value = null
+        viewModelScope.launch {
+            val storedDraws = repository.getStoredDraws(sourceId)
+            _userNumbersAnalysis.value = LotoStatsCalculator.analyzeUserProposedNumbers(valid, storedDraws)
+        }
+    }
+
+    /**
+     * Analyse une saisie texte libre (ex: "12, 27, 45" ou "12 27 45") contenant 1 à 5 numéros.
+     * Ajoute les nouveaux numéros à la sélection courante ou remplace si la saisie contient plusieurs numéros.
+     */
+    fun submitUserNumbersInput(rawInput: String): Boolean {
+        val tokens = rawInput.trim()
+            .split(Regex("[,;\\s\\-/]+"))
+            .filter { it.isNotBlank() }
+
+        if (tokens.isEmpty()) {
+            if (_userProposedNumbers.value.isNotEmpty()) {
+                analyzeUserProposedNumbersFromHistory(_userProposedNumbers.value)
+                return true
+            }
+            snackbarMessage.value = "Entrez 1 à 5 numéros entre 0 et 90 (ex : 12, 27, 45)."
+            return false
+        }
+
+        val parsed = mutableListOf<Int>()
+        for (token in tokens) {
+            val value = token.toIntOrNull()
+            if (value == null || value !in 0..90) {
+                snackbarMessage.value = "Numéro invalide « $token » : utilisez uniquement des chiffres entre 0 et 90."
+                return false
+            }
+            if (!parsed.contains(value)) {
+                parsed.add(value)
+            }
+        }
+
+        val combined = if (parsed.size == 1 && _userProposedNumbers.value.size < 5) {
+            (_userProposedNumbers.value + parsed).distinct()
+        } else {
+            parsed
+        }
+
+        if (combined.size > 5) {
+            snackbarMessage.value = "Maximum 5 numéros par analyse (seuls les 5 premiers sont retenus)."
+        }
+
+        val finalSelection = combined.take(5).sorted()
+        val currentDraws = draws.value
+        if (currentDraws.isNotEmpty()) {
+            analyzeUserProposedNumbers(finalSelection, currentDraws)
+        } else {
+            analyzeUserProposedNumbersFromHistory(finalSelection)
+        }
+        return true
+    }
+
+    fun removeUserProposedNumber(number: Int) {
+        val updated = _userProposedNumbers.value.filter { it != number }
+        _userProposedNumbers.value = updated
+        _userNumbersAiReport.value = null
+        if (updated.isEmpty()) {
+            _userNumbersAnalysis.value = null
+        } else {
+            val currentDraws = draws.value
+            if (currentDraws.isNotEmpty()) {
+                _userNumbersAnalysis.value = LotoStatsCalculator.analyzeUserProposedNumbers(updated, currentDraws)
+            } else {
+                analyzeUserProposedNumbersFromHistory(updated)
+            }
+        }
+    }
+
+    fun clearUserProposedNumbers() {
+        _userProposedNumbers.value = emptyList()
+        _userNumbersAnalysis.value = null
+        _userNumbersAiReport.value = null
+    }
+
+    fun requestAiAnalysisForUserNumbers() {
+        val currentAnalysis = _userNumbersAnalysis.value
+        if (currentAnalysis == null) {
+            snackbarMessage.value = "Analysez d'abord vos chiffres avant de demander l'avis de l'IA."
+            return
+        }
+        viewModelScope.launch {
+            isAnalyzingUserNumbersWithAi.value = true
+            try {
+                val currentSource = sources.value.find { it.id == _selectedSourceId.value }
+                val sourceName = currentSource?.name ?: "Niger Loto"
+                val result = aiService.analyzeUserNumbers(
+                    analysis = currentAnalysis,
+                    recentDraws = draws.value,
+                    sourceName = sourceName
+                )
+                result.onSuccess { report ->
+                    _userNumbersAiReport.value = report
+                }.onFailure { err ->
+                    snackbarMessage.value = "Erreur IA : ${err.localizedMessage}"
+                }
+            } finally {
+                isAnalyzingUserNumbersWithAi.value = false
+            }
+        }
+    }
+
+    fun saveUserProposedNumbersForTracking() {
+        val analysis = _userNumbersAnalysis.value
+        if (analysis == null || analysis.numbers.isEmpty()) {
+            snackbarMessage.value = "Sélectionnez et analysez vos chiffres d'abord."
+            return
+        }
+        val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+        val cal = Calendar.getInstance()
+        cal.add(Calendar.DAY_OF_YEAR, 1)
+        val targetDate = sdf.format(cal.time)
+
+        val entity = ProposedCombination(
+            sourceId = _selectedSourceId.value,
+            targetDateString = targetDate,
+            rank = 1,
+            numbersCsv = analysis.numbers.joinToString(","),
+            scorePercent = analysis.statisticalScorePercent,
+            weightsSummary = "Perso ${analysis.gameTypeLabel}",
+            evaluated = false
+        )
+
+        viewModelScope.launch {
+            repository.saveDailyPropositions(listOf(entity))
+            snackbarMessage.value = "Vos chiffres (${analysis.numbers.joinToString(" - ")}) sont enregistrés pour le tirage du $targetDate !"
+        }
     }
 }

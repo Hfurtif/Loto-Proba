@@ -16,6 +16,13 @@ data class NumberStat(
     val score: Double = 0.0
 )
 
+data class NumberFrequency(
+    val number: Int,
+    val formattedNumber: String, // "01" à "90"
+    val count: Int,
+    val frequencyPercent: Double
+)
+
 data class PairStat(
     val n1: Int,
     val n2: Int,
@@ -31,13 +38,81 @@ data class TrioStat(
     val frequencyPercent: Double
 )
 
+data class PairsAndTriosAnalysis(
+    val totalDrawsAnalyzed: Int,
+    val topPairs: List<PairStat>,
+    val topTrios: List<TrioStat>
+)
+
+data class NumberGapStat(
+    val number: Int,
+    val formattedNumber: String,
+    val drawsSinceLastAppearance: Int,
+    val maxGap: Int,
+    val lastSeenDate: String?,
+    val recentAppearances: Int,
+    val totalAppearances: Int,
+    val neverAppeared: Boolean
+)
+
+data class GapAndColdAnalysis(
+    val totalDrawsAnalyzed: Int,
+    val recentWindowSize: Int,
+    val numberGaps: List<NumberGapStat>,
+    val longestGaps: List<NumberGapStat>,
+    val leastRecentlyDrawn: List<NumberGapStat>
+)
+
+data class UserNumberDetail(
+    val number: Int,
+    val formattedNumber: String,
+    val totalCount: Int,
+    val frequencyPercent: Double,
+    val recentCount: Int,
+    val currentGap: Int,
+    val maxGap: Int,
+    val individualScorePercent: Double,
+    val trendLabel: String
+)
+
+data class UserPairSynergy(
+    val n1: Int,
+    val n2: Int,
+    val coOccurrenceCount: Int,
+    val coOccurrencePercent: Double
+)
+
+data class UserNumbersAnalysis(
+    val numbers: List<Int>,
+    val gameTypeLabel: String,
+    val totalDrawsAnalyzed: Int,
+    val statisticalScorePercent: Double,
+    val exactHitProbabilityPercent: Double,
+    val exactHitOddsText: String,
+    val atLeastOneHitProbabilityPercent: Double,
+    val exactGroupHistoricalHits: Int,
+    val exactGroupHitDates: List<String>,
+    val partial2PlusHistoricalHits: Int,
+    val numberDetails: List<UserNumberDetail>,
+    val pairSynergies: List<UserPairSynergy>,
+    val feasibilityLevel: String,
+    val verdictExplanation: String,
+    val recommendations: List<String>
+)
+
 data class ChiSquareResult(
     val chiSquareValue: Double,
     val degreesOfFreedom: Int, // 90
     val criticalValue005: Double = 113.145, // Seuil à alpha = 0.05 pour df = 90
     val pValueApprox: Double,
     val isCompatibleWithRandom: Boolean,
-    val plainFrenchExplanation: String
+    val plainFrenchExplanation: String,
+    val totalDrawsAnalyzed: Int = 0,
+    val totalObservations: Int = 0,
+    val expectedFrequencyPerNumber: Double = 0.0,
+    val minObservedFrequency: Int = 0,
+    val maxObservedFrequency: Int = 0,
+    val hasSufficientData: Boolean = false
 )
 
 data class GeneratedCombination(
@@ -142,14 +217,152 @@ object LotoStatsCalculator {
     }
 
     /**
-     * Recherche les paires les plus fréquentes (Top 10)
+     * Calcule la fréquence d'apparition de chaque numéro de 01 à 90 à partir des tirages stockés.
+     */
+    fun calculateNumberFrequencies01To90(draws: List<LotoDraw>): List<NumberFrequency> {
+        val totalDraws = draws.size
+        val counts = IntArray(91)
+
+        for (draw in draws) {
+            for (n in draw.getNumbersList()) {
+                if (n in 1..90) {
+                    counts[n]++
+                }
+            }
+        }
+
+        return (1..90).map { number ->
+            val count = counts[number]
+            val pct = if (totalDraws > 0) (count.toDouble() / totalDraws) * 100.0 else 0.0
+            NumberFrequency(
+                number = number,
+                formattedNumber = number.toString().padStart(2, '0'),
+                count = count,
+                frequencyPercent = pct
+            )
+        }
+    }
+
+    /**
+     * Calcule le nombre de tirages écoulés depuis la dernière apparition de chaque numéro (retards)
+     * et identifie les numéros les moins sortis sur la fenêtre récente spécifiée.
+     */
+    fun calculateNumberGapsAndLeastRecent(
+        draws: List<LotoDraw>,
+        recentWindowSize: Int = 30,
+        topLimit: Int = 10
+    ): GapAndColdAnalysis {
+        val safeWindow = recentWindowSize.coerceAtLeast(1)
+        val safeLimit = topLimit.coerceIn(1, TOTAL_NUMBERS)
+        val totalDraws = draws.size
+
+        if (totalDraws == 0) {
+            val emptyGaps = (0..90).map { n ->
+                NumberGapStat(
+                    number = n,
+                    formattedNumber = n.toString().padStart(2, '0'),
+                    drawsSinceLastAppearance = 0,
+                    maxGap = 0,
+                    lastSeenDate = null,
+                    recentAppearances = 0,
+                    totalAppearances = 0,
+                    neverAppeared = true
+                )
+            }
+            return GapAndColdAnalysis(
+                totalDrawsAnalyzed = 0,
+                recentWindowSize = safeWindow,
+                numberGaps = emptyGaps,
+                longestGaps = emptyList(),
+                leastRecentlyDrawn = emptyList()
+            )
+        }
+
+        val sortedDraws = draws.sortedBy { it.dateString }
+        val effectiveWindow = minOf(safeWindow, totalDraws)
+        val recentDraws = sortedDraws.takeLast(effectiveWindow)
+
+        val totalCounts = IntArray(TOTAL_NUMBERS)
+        val recentCounts = IntArray(TOTAL_NUMBERS)
+        val maxGaps = IntArray(TOTAL_NUMBERS)
+        val lastSeenIndex = IntArray(TOTAL_NUMBERS) { -1 }
+        val lastSeenDates = arrayOfNulls<String>(TOTAL_NUMBERS)
+
+        for (idx in sortedDraws.indices) {
+            val draw = sortedDraws[idx]
+            for (n in draw.getNumbersList().distinct()) {
+                if (n in 0..90) {
+                    totalCounts[n]++
+                    val gapSinceLast = if (lastSeenIndex[n] == -1) idx else idx - lastSeenIndex[n] - 1
+                    if (gapSinceLast > maxGaps[n]) {
+                        maxGaps[n] = gapSinceLast
+                    }
+                    lastSeenIndex[n] = idx
+                    lastSeenDates[n] = draw.dateString
+                }
+            }
+        }
+
+        for (draw in recentDraws) {
+            for (n in draw.getNumbersList().distinct()) {
+                if (n in 0..90) {
+                    recentCounts[n]++
+                }
+            }
+        }
+
+        val numberGaps = (0..90).map { n ->
+            val lastIdx = lastSeenIndex[n]
+            val neverAppeared = lastIdx == -1
+            val currentGap = if (neverAppeared) totalDraws else (totalDraws - 1) - lastIdx
+            val maxGap = maxOf(maxGaps[n], currentGap)
+            NumberGapStat(
+                number = n,
+                formattedNumber = n.toString().padStart(2, '0'),
+                drawsSinceLastAppearance = currentGap,
+                maxGap = maxGap,
+                lastSeenDate = lastSeenDates[n],
+                recentAppearances = recentCounts[n],
+                totalAppearances = totalCounts[n],
+                neverAppeared = neverAppeared
+            )
+        }
+
+        val longestGaps = numberGaps
+            .sortedWith(
+                compareByDescending<NumberGapStat> { it.drawsSinceLastAppearance }
+                    .thenBy { it.totalAppearances }
+                    .thenBy { it.number }
+            )
+            .take(safeLimit)
+
+        val leastRecentlyDrawn = numberGaps
+            .sortedWith(
+                compareBy<NumberGapStat> { it.recentAppearances }
+                    .thenByDescending { it.drawsSinceLastAppearance }
+                    .thenBy { it.totalAppearances }
+                    .thenBy { it.number }
+            )
+            .take(safeLimit)
+
+        return GapAndColdAnalysis(
+            totalDrawsAnalyzed = totalDraws,
+            recentWindowSize = effectiveWindow,
+            numberGaps = numberGaps,
+            longestGaps = longestGaps,
+            leastRecentlyDrawn = leastRecentlyDrawn
+        )
+    }
+
+    /**
+     * Recherche les paires les plus fréquentes (Top N) avec tri déterministe
      */
     fun calculateTopPairs(draws: List<LotoDraw>, limit: Int = 10): List<PairStat> {
-        if (draws.isEmpty()) return emptyList()
+        if (draws.isEmpty() || limit <= 0) return emptyList()
         val pairCounts = mutableMapOf<Pair<Int, Int>, Int>()
 
         for (draw in draws) {
-            val nums = draw.getNumbersList()
+            val nums = draw.getNumbersList().distinct()
             for (i in 0 until nums.size) {
                 for (j in i + 1 until nums.size) {
                     val pair = Pair(nums[i], nums[j])
@@ -159,7 +372,11 @@ object LotoStatsCalculator {
         }
 
         return pairCounts.entries
-            .sortedByDescending { it.value }
+            .sortedWith(
+                compareByDescending<Map.Entry<Pair<Int, Int>, Int>> { it.value }
+                    .thenBy { it.key.first }
+                    .thenBy { it.key.second }
+            )
             .take(limit)
             .map { entry ->
                 PairStat(
@@ -172,14 +389,14 @@ object LotoStatsCalculator {
     }
 
     /**
-     * Recherche les trios les plus fréquents (Top 10)
+     * Recherche les trios les plus fréquents (Top N) avec tri déterministe
      */
     fun calculateTopTrios(draws: List<LotoDraw>, limit: Int = 10): List<TrioStat> {
-        if (draws.isEmpty()) return emptyList()
+        if (draws.isEmpty() || limit <= 0) return emptyList()
         val trioCounts = mutableMapOf<Triple<Int, Int, Int>, Int>()
 
         for (draw in draws) {
-            val nums = draw.getNumbersList()
+            val nums = draw.getNumbersList().distinct()
             for (i in 0 until nums.size) {
                 for (j in i + 1 until nums.size) {
                     for (k in j + 1 until nums.size) {
@@ -191,7 +408,12 @@ object LotoStatsCalculator {
         }
 
         return trioCounts.entries
-            .sortedByDescending { it.value }
+            .sortedWith(
+                compareByDescending<Map.Entry<Triple<Int, Int, Int>, Int>> { it.value }
+                    .thenBy { it.key.first }
+                    .thenBy { it.key.second }
+                    .thenBy { it.key.third }
+            )
             .take(limit)
             .map { entry ->
                 TrioStat(
@@ -205,36 +427,101 @@ object LotoStatsCalculator {
     }
 
     /**
+     * Analyse statistique complète identifiant simultanément les paires et trios
+     * les plus fréquemment tirés ensemble dans l'historique.
+     */
+    fun analyzeTopPairsAndTrios(
+        draws: List<LotoDraw>,
+        pairLimit: Int = 10,
+        trioLimit: Int = 10
+    ): PairsAndTriosAnalysis {
+        return PairsAndTriosAnalysis(
+            totalDrawsAnalyzed = draws.size,
+            topPairs = calculateTopPairs(draws, pairLimit),
+            topTrios = calculateTopTrios(draws, trioLimit)
+        )
+    }
+
+    /**
      * Test d'équité du Chi-carré (Chi-square Goodness of Fit Test)
      * Teste si les fréquences observées des 91 numéros (0 à 90) sont compatibles
-     * avec une distribution uniforme (le hasard pur).
+     * avec une distribution théorique uniforme (le hasard pur).
      */
     fun calculateChiSquareTest(draws: List<LotoDraw>): ChiSquareResult {
         val totalDraws = draws.size
         if (totalDraws < 10) {
             return ChiSquareResult(
                 chiSquareValue = 0.0,
-                degreesOfFreedom = 90,
+                degreesOfFreedom = TOTAL_NUMBERS - 1,
                 pValueApprox = 1.0,
                 isCompatibleWithRandom = true,
-                plainFrenchExplanation = "Données insuffisantes (minimum 10 tirages requis pour une interprétation statistique fiable)."
+                plainFrenchExplanation = "Données insuffisantes (minimum 10 tirages requis pour une interprétation statistique fiable).",
+                totalDrawsAnalyzed = totalDraws,
+                totalObservations = totalDraws * COMBINATION_SIZE,
+                expectedFrequencyPerNumber = if (totalDraws > 0) (totalDraws * COMBINATION_SIZE.toDouble()) / TOTAL_NUMBERS else 0.0,
+                minObservedFrequency = 0,
+                maxObservedFrequency = 0,
+                hasSufficientData = false
             )
         }
 
-        val df = TOTAL_NUMBERS - 1 // 91 - 1 = 90
         val counts = IntArray(TOTAL_NUMBERS)
         for (draw in draws) {
-            for (n in draw.getNumbersList()) {
+            for (n in draw.getNumbersList().distinct()) {
                 if (n in 0..90) counts[n]++
             }
         }
 
-        // Fréquence théorique attendue sous l'hypothèse d'équiprobabilité
-        // Chaque tirage de 5 numéros répartit 5 sorties sur 91 numéros
-        val expected = (totalDraws * 5.0) / TOTAL_NUMBERS
+        return calculateChiSquareFromObservedCounts(
+            observedCounts = counts,
+            totalDrawsAnalyzed = totalDraws
+        )
+    }
+
+    /**
+     * Compare un tableau des fréquences observées (indices 0..90) à une distribution
+     * théorique uniforme via le test d'adéquation du Chi-carré.
+     */
+    fun calculateChiSquareFromObservedCounts(
+        observedCounts: IntArray,
+        totalDrawsAnalyzed: Int = (observedCounts.sum() / COMBINATION_SIZE)
+    ): ChiSquareResult {
+        val normalized = IntArray(TOTAL_NUMBERS)
+        val limit = minOf(observedCounts.size, TOTAL_NUMBERS)
+        var totalObservations = 0
+        var minObserved = Int.MAX_VALUE
+        var maxObserved = 0
+
+        for (i in 0 until TOTAL_NUMBERS) {
+            val value = if (i < limit) observedCounts[i].coerceAtLeast(0) else 0
+            normalized[i] = value
+            totalObservations += value
+            if (value < minObserved) minObserved = value
+            if (value > maxObserved) maxObserved = value
+        }
+
+        val df = TOTAL_NUMBERS - 1 // 91 - 1 = 90
+        if (totalObservations < 10 * COMBINATION_SIZE) {
+            return ChiSquareResult(
+                chiSquareValue = 0.0,
+                degreesOfFreedom = df,
+                pValueApprox = 1.0,
+                isCompatibleWithRandom = true,
+                plainFrenchExplanation = "Données insuffisantes (minimum 10 tirages requis pour une interprétation statistique fiable).",
+                totalDrawsAnalyzed = totalDrawsAnalyzed,
+                totalObservations = totalObservations,
+                expectedFrequencyPerNumber = totalObservations.toDouble() / TOTAL_NUMBERS,
+                minObservedFrequency = if (minObserved == Int.MAX_VALUE) 0 else minObserved,
+                maxObservedFrequency = maxObserved,
+                hasSufficientData = false
+            )
+        }
+
+        // Fréquence théorique uniforme attendue sous l'hypothèse d'équiprobabilité
+        val expected = totalObservations.toDouble() / TOTAL_NUMBERS
 
         var chi2 = 0.0
-        for (observed in counts) {
+        for (observed in normalized) {
             val diff = observed - expected
             chi2 += (diff * diff) / expected
         }
@@ -248,9 +535,9 @@ object LotoStatsCalculator {
         val roundedP = "%.3f".format(pValue)
 
         val explanation = if (isRandom) {
-            "Le test du Khi-carré (χ² = $roundedChi2, p = $roundedP) confirme que la répartition des sorties est parfaitement compatible avec le hasard pur (équiprobabilité des 91 numéros)."
+            "Le test du Khi-carré (χ² = $roundedChi2, p = $roundedP) confirme que la répartition des sorties est parfaitement compatible avec la distribution théorique uniforme (équiprobabilité des 91 numéros)."
         } else {
-            "Le test du Khi-carré (χ² = $roundedChi2, p = $roundedP) relève un écart statistique à l'équiprobabilité sur cet échantillon, sans toutefois remettre en cause le hasard des tirages futurs."
+            "Le test du Khi-carré (χ² = $roundedChi2, p = $roundedP) relève un écart statistique significatif par rapport à la distribution uniforme sur cet échantillon, sans remettre en cause l'indépendance des tirages futurs."
         }
 
         return ChiSquareResult(
@@ -259,7 +546,13 @@ object LotoStatsCalculator {
             criticalValue005 = criticalVal,
             pValueApprox = pValue,
             isCompatibleWithRandom = isRandom,
-            plainFrenchExplanation = explanation
+            plainFrenchExplanation = explanation,
+            totalDrawsAnalyzed = totalDrawsAnalyzed,
+            totalObservations = totalObservations,
+            expectedFrequencyPerNumber = expected,
+            minObservedFrequency = if (minObserved == Int.MAX_VALUE) 0 else minObserved,
+            maxObservedFrequency = maxObserved,
+            hasSufficientData = true
         )
     }
 
@@ -639,5 +932,233 @@ object LotoStatsCalculator {
             topNap3Trios = nap3List,
             perm5 = perm5
         )
+    }
+
+    /**
+     * Analyse une sélection personnelle de 1 à 5 numéros proposée par l'utilisateur :
+     * - Probabilité mathématique exacte de sortie dans un tirage 5 parmi 91 (0 à 90)
+     * - Fréquence, sorties récentes et retard de chaque numéro choisi
+     * - Co-occurrences historiques (paires et groupe complet dans l'historique)
+     * - Indice statistique et verdict explicite sur la faisabilité du tirage
+     */
+    fun analyzeUserProposedNumbers(
+        proposedNumbers: List<Int>,
+        draws: List<LotoDraw>
+    ): UserNumbersAnalysis {
+        val cleanNumbers = proposedNumbers.filter { it in 0..90 }.distinct().sorted().take(5)
+        require(cleanNumbers.isNotEmpty()) { "Au moins 1 numéro entre 0 et 90 est requis." }
+
+        val k = cleanNumbers.size
+        val gameTypeLabel = when (k) {
+            1 -> "NAP 1 (N1 - 1 numéro)"
+            2 -> "NAP 2 (N2 - 2 numéros)"
+            3 -> "NAP 3 (N3 - 3 numéros)"
+            4 -> "Sélection 4 numéros"
+            else -> "Grille complète (5 numéros)"
+        }
+
+        val totalCombos = binomialLong(TOTAL_NUMBERS, COMBINATION_SIZE).toDouble() // 46 504 458
+        val favorableExact = binomialLong(TOTAL_NUMBERS - k, COMBINATION_SIZE - k).toDouble()
+        val exactProb = (favorableExact / totalCombos).coerceIn(0.0, 1.0)
+        val exactProbPct = exactProb * 100.0
+        val oneInX = if (favorableExact > 0.0) totalCombos / favorableExact else totalCombos
+        val formattedOdds = when {
+            oneInX < 1000.0 -> "%.1f".format(oneInX).replace('.', ',')
+            else -> "%,d".format(Math.round(oneInX)).replace(',', ' ')
+        }
+        val formattedExactPct = when {
+            exactProbPct >= 0.1 -> "%.2f".format(exactProbPct).replace('.', ',')
+            exactProbPct >= 0.001 -> "%.4f".format(exactProbPct).replace('.', ',')
+            else -> "%.7f".format(exactProbPct).replace('.', ',')
+        }
+        val exactHitOddsText = "1 chance sur $formattedOdds ($formattedExactPct %)"
+
+        val zeroHitsWays = binomialLong(TOTAL_NUMBERS - k, COMBINATION_SIZE).toDouble()
+        val atLeastOneProbPct = ((1.0 - (zeroHitsWays / totalCombos)) * 100.0).coerceIn(0.0, 100.0)
+
+        val stats = calculateNumberStats(draws)
+        val statsMap = stats.associateBy { it.number }
+        val totalDraws = draws.size
+
+        val maxGlobal = stats.maxOfOrNull { it.count }?.coerceAtLeast(1) ?: 1
+        val maxRecent = stats.maxOfOrNull { it.recentCount }?.coerceAtLeast(1) ?: 1
+        val maxGap = stats.maxOfOrNull { it.currentGap }?.coerceAtLeast(1) ?: 1
+
+        val numberDetails = cleanNumbers.map { num ->
+            val st = statsMap[num] ?: NumberStat(num, 0, 0.0, 0, 0, 0)
+            val individualScore = if (totalDraws == 0) {
+                50.0
+            } else {
+                val normRecent = (st.recentCount.toDouble() / maxRecent) * 100.0
+                val normGlobal = (st.count.toDouble() / maxGlobal) * 100.0
+                val normGap = (st.currentGap.toDouble() / maxGap) * 100.0
+                roundOneDecimal((normRecent * 0.40) + (normGlobal * 0.30) + (normGap * 0.30))
+            }
+            val trendLabel = when {
+                totalDraws == 0 -> "Historique vide"
+                st.count == 0 -> "Jamais sorti"
+                st.recentCount >= 3 && st.currentGap <= 6 -> "Chaud et actif"
+                st.currentGap >= 18 -> "Fort retard (${st.currentGap} tirages)"
+                st.recentCount == 0 -> "Calme récemment"
+                else -> "Régulier / Équilibré"
+            }
+            UserNumberDetail(
+                number = num,
+                formattedNumber = num.toString().padStart(2, '0'),
+                totalCount = st.count,
+                frequencyPercent = roundOneDecimal(st.frequencyPercent),
+                recentCount = st.recentCount,
+                currentGap = st.currentGap,
+                maxGap = st.maxGap,
+                individualScorePercent = individualScore,
+                trendLabel = trendLabel
+            )
+        }
+
+        val sortedNewestFirst = draws.sortedByDescending { it.dateString }
+        val exactHitDates = mutableListOf<String>()
+        var partial2PlusHits = 0
+        val cleanSet = cleanNumbers.toSet()
+
+        for (draw in sortedNewestFirst) {
+            val drawNums = draw.getNumbersList().distinct()
+            val matches = drawNums.count { it in cleanSet }
+            if (matches == k) {
+                exactHitDates.add(draw.dateString)
+            }
+            if (k >= 2 && matches >= 2) {
+                partial2PlusHits++
+            } else if (k == 1 && matches == 1) {
+                partial2PlusHits++
+            }
+        }
+
+        val pairSynergies = mutableListOf<UserPairSynergy>()
+        if (k >= 2) {
+            for (i in 0 until cleanNumbers.size) {
+                for (j in i + 1 until cleanNumbers.size) {
+                    val a = cleanNumbers[i]
+                    val b = cleanNumbers[j]
+                    val countTogether = draws.count { draw ->
+                        val nums = draw.getNumbersList()
+                        nums.contains(a) && nums.contains(b)
+                    }
+                    val pct = if (totalDraws > 0) roundOneDecimal((countTogether.toDouble() / totalDraws) * 100.0) else 0.0
+                    pairSynergies.add(
+                        UserPairSynergy(
+                            n1 = a,
+                            n2 = b,
+                            coOccurrenceCount = countTogether,
+                            coOccurrencePercent = pct
+                        )
+                    )
+                }
+            }
+            pairSynergies.sortByDescending { it.coOccurrenceCount }
+        }
+
+        val baseScore = numberDetails.map { it.individualScorePercent }.average()
+        val synergyBonus = when {
+            totalDraws == 0 || k == 1 -> 0.0
+            exactHitDates.isNotEmpty() -> 8.0
+            pairSynergies.any { it.coOccurrenceCount > 0 } -> 4.0
+            else -> -4.0
+        }
+        val statisticalScore = roundOneDecimal((baseScore + synergyBonus).coerceIn(5.0, 98.0))
+
+        val feasibilityLevel = when (k) {
+            1 -> if (statisticalScore >= 60.0) "Très réaliste (NAP 1 porteur)" else "Réaliste (probabilité unitaire standard)"
+            2 -> if (exactHitDates.isNotEmpty() || statisticalScore >= 65.0) "Envisageable (bonne synergie NAP 2)" else "Modéré (exige la sortie simultanée de 2 numéros)"
+            3 -> if (exactHitDates.isNotEmpty()) "Difficile mais déjà observé en historique" else "Très ambitieux (trio rare mathématiquement)"
+            else -> "Extrêmement rare en bloc complet"
+        }
+
+        val numbersFormatted = cleanNumbers.joinToString(" - ") { it.toString().padStart(2, '0') }
+        val strongest = numberDetails.maxByOrNull { it.individualScorePercent }
+        val hottestGap = numberDetails.maxByOrNull { it.currentGap }
+
+        val verdictExplanation = buildString {
+            append("Pour votre sélection ($numbersFormatted) en $gameTypeLabel, ")
+            append("la probabilité mathématique fixe qu'elle sorte au complet lors du prochain tirage est de $exactHitOddsText")
+            if (k >= 2) {
+                append(" (et de ${"%.1f".format(atLeastOneProbPct).replace('.', ',')} % qu'au moins un de ces numéros sorte)")
+            }
+            append(". ")
+
+            if (totalDraws == 0) {
+                append("Aucun tirage n'est encore enregistré dans l'historique pour comparer la dynamique passée de ces chiffres.")
+            } else {
+                when (k) {
+                    1 -> {
+                        val d = numberDetails.first()
+                        append("Sur $totalDraws tirages analysés, le numéro ${d.formattedNumber} est sorti ${d.totalCount} fois (${d.frequencyPercent} %) avec un retard actuel de ${d.currentGap} tirages.")
+                    }
+                    else -> {
+                        if (exactHitDates.isNotEmpty()) {
+                            append("Dans l'historique ($totalDraws tirages), ces $k numéros sont déjà sortis ensemble ${exactHitDates.size} fois (dernière fois le ${exactHitDates.first()}). ")
+                        } else {
+                            append("Dans les $totalDraws tirages archivés, cette combinaison exacte de $k numéros n'est encore jamais tombée ensemble au complet")
+                            if (partial2PlusHits > 0) {
+                                append(", mais au moins 2 d'entre eux ont coïncidé $partial2PlusHits fois")
+                            }
+                            append(". ")
+                        }
+                        if (strongest != null) {
+                            append("Votre chiffre le plus actif statistiquement est le ${strongest.formattedNumber} (score ${strongest.individualScorePercent} %).")
+                        }
+                    }
+                }
+            }
+        }
+
+        val recommendations = mutableListOf<String>()
+        recommendations.add(
+            "Indépendance des tirages : chaque numéro garde exactement 5 chances sur 91 (5,49 %) de sortir demain, quel que soit son passé."
+        )
+        if (k >= 3 && exactHitDates.isEmpty() && pairSynergies.isNotEmpty()) {
+            val bestPair = pairSynergies.first()
+            recommendations.add(
+                "Votre sélection complète étant rare en bloc, envisagez aussi la paire ${bestPair.n1.toString().padStart(2, '0')}-${bestPair.n2.toString().padStart(2, '0')} en NAP 2 (${bestPair.coOccurrenceCount} sorties ensemble)."
+            )
+        }
+        if (k >= 2 && strongest != null) {
+            recommendations.add(
+                "Pour sécuriser la mise, le numéro ${strongest.formattedNumber} (${strongest.trendLabel.lowercase()}) est votre meilleur candidat pour un jeu simple en NAP 1."
+            )
+        }
+        if (hottestGap != null && hottestGap.currentGap >= 18) {
+            recommendations.add(
+                "Attention au numéro ${hottestGap.formattedNumber} qui cumule ${hottestGap.currentGap} tirages de retard : sa sortie reste possible mais imprévisible à court terme."
+            )
+        }
+
+        return UserNumbersAnalysis(
+            numbers = cleanNumbers,
+            gameTypeLabel = gameTypeLabel,
+            totalDrawsAnalyzed = totalDraws,
+            statisticalScorePercent = statisticalScore,
+            exactHitProbabilityPercent = exactProbPct,
+            exactHitOddsText = exactHitOddsText,
+            atLeastOneHitProbabilityPercent = atLeastOneProbPct,
+            exactGroupHistoricalHits = exactHitDates.size,
+            exactGroupHitDates = exactHitDates.take(5),
+            partial2PlusHistoricalHits = partial2PlusHits,
+            numberDetails = numberDetails,
+            pairSynergies = pairSynergies,
+            feasibilityLevel = feasibilityLevel,
+            verdictExplanation = verdictExplanation,
+            recommendations = recommendations
+        )
+    }
+
+    private fun binomialLong(n: Int, k: Int): Long {
+        if (k < 0 || k > n) return 0L
+        if (k == 0 || k == n) return 1L
+        val kk = minOf(k, n - k)
+        var result = 1L
+        for (i in 1..kk) {
+            result = (result * (n - kk + i)) / i
+        }
+        return result
     }
 }

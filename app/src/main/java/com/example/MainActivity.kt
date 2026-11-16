@@ -24,6 +24,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Analytics
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Balance
 import androidx.compose.material.icons.filled.Casino
 import androidx.compose.material.icons.filled.Download
@@ -74,6 +75,7 @@ import com.example.ui.dialogs.AddDrawDialog
 import com.example.ui.dialogs.AddSourceDialog
 import com.example.ui.dialogs.ImportReportDialog
 import com.example.ui.dialogs.ManualImportDialog
+import com.example.ui.screens.AiScreen
 import com.example.ui.screens.CombinationsScreen
 import com.example.ui.screens.DrawsScreen
 import com.example.ui.screens.NapScreen
@@ -109,8 +111,13 @@ class MainActivity : ComponentActivity() {
                 val draws by viewModel.draws.collectAsStateWithLifecycle()
                 val isRefreshing by viewModel.isRefreshing.collectAsStateWithLifecycle()
                 val numberStats by viewModel.numberStats.collectAsStateWithLifecycle()
+                val numberFrequencies01To90 by viewModel.numberFrequencies01To90.collectAsStateWithLifecycle()
                 val topPairs by viewModel.topPairs.collectAsStateWithLifecycle()
                 val topTrios by viewModel.topTrios.collectAsStateWithLifecycle()
+                val pairsAndTriosAnalysis by viewModel.pairsAndTriosAnalysis.collectAsStateWithLifecycle()
+                val pairTrioLimit by viewModel.pairTrioLimit.collectAsStateWithLifecycle()
+                val gapAndColdAnalysis by viewModel.gapAndColdAnalysis.collectAsStateWithLifecycle()
+                val recentWindowSize by viewModel.recentWindowSize.collectAsStateWithLifecycle()
                 val chiSquareResult by viewModel.chiSquareResult.collectAsStateWithLifecycle()
                 val generatedCombinations by viewModel.generatedCombinations.collectAsStateWithLifecycle()
                 val weightRecent by viewModel.weightRecent.collectAsStateWithLifecycle()
@@ -121,13 +128,25 @@ class MainActivity : ComponentActivity() {
                 val trackingSummary by viewModel.trackingSummary.collectAsStateWithLifecycle()
 
                 val dailyNapPackage by viewModel.dailyNapPackage.collectAsStateWithLifecycle()
+                val userProposedNumbers by viewModel.userProposedNumbers.collectAsStateWithLifecycle()
+                val userNumbersAnalysis by viewModel.userNumbersAnalysis.collectAsStateWithLifecycle()
+                val userNumbersAiReport by viewModel.userNumbersAiReport.collectAsStateWithLifecycle()
+                val isAnalyzingUserNumbersWithAi by viewModel.isAnalyzingUserNumbersWithAi.collectAsStateWithLifecycle()
                 val showManualImport by viewModel.showManualImportDialog.collectAsStateWithLifecycle()
                 val showAddDraw by viewModel.showAddDrawDialog.collectAsStateWithLifecycle()
                 val showAddSource by viewModel.showAddSourceDialog.collectAsStateWithLifecycle()
                 val importReport by viewModel.importReport.collectAsStateWithLifecycle()
                 val editingSource by viewModel.editingSource.collectAsStateWithLifecycle()
 
-                var currentTab by remember { mutableIntStateOf(0) } // 0: Résultats, 1: NAP 1-2-3, 2: Statistiques, 3: Suivi NAP, 4: Sources
+                // États de l'Analyste IA
+                val customApiKey by viewModel.customApiKey.collectAsStateWithLifecycle()
+                val isApiKeyConfigured by viewModel.isApiKeyConfigured.collectAsStateWithLifecycle()
+                val isAiGenerating by viewModel.isAiGenerating.collectAsStateWithLifecycle()
+                val isAiEvaluating by viewModel.isAiEvaluating.collectAsStateWithLifecycle()
+                val aiEvaluations by viewModel.aiEvaluations.collectAsStateWithLifecycle()
+                val latestAiPrediction by viewModel.latestAiPrediction.collectAsStateWithLifecycle()
+
+                var currentTab by remember { mutableIntStateOf(0) } // 0: Résultats, 1: NAP 1-2-3, 2: Statistiques, 3: Suivi NAP, 4: Sources, 5: IA
                 val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
                 val coroutineScope = rememberCoroutineScope()
                 val context = LocalContext.current
@@ -251,6 +270,18 @@ class MainActivity : ComponentActivity() {
                                 )
 
                                 NavigationDrawerItem(
+                                    icon = { Icon(Icons.Default.AutoAwesome, contentDescription = null) },
+                                    label = { Text("Analyste IA & Prédictions", fontWeight = FontWeight.Bold) },
+                                    badge = { Text("Gemini", fontSize = 10.sp, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold) },
+                                    selected = currentTab == 5,
+                                    onClick = {
+                                        currentTab = 5
+                                        coroutineScope.launch { drawerState.close() }
+                                    },
+                                    modifier = Modifier.padding(vertical = 2.dp)
+                                )
+
+                                NavigationDrawerItem(
                                     icon = { Icon(Icons.Default.Public, contentDescription = null) },
                                     label = { Text("Gestion Pays & Liens URL", fontWeight = FontWeight.SemiBold) },
                                     badge = { Text("Sources", fontSize = 10.sp) },
@@ -349,7 +380,8 @@ class MainActivity : ComponentActivity() {
                                                 1 -> "Tiroir : Pronostics NAP 1-2-3"
                                                 2 -> "Tiroir : Statistiques & Fréquences"
                                                 3 -> "Tiroir : Suivi des Gains"
-                                                else -> "Tiroir : Gestion des Pays"
+                                                4 -> "Tiroir : Gestion des Pays"
+                                                else -> "Tiroir : Analyste IA & Clé API"
                                             },
                                             fontSize = 11.5.sp,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -367,6 +399,15 @@ class MainActivity : ComponentActivity() {
                                         IconButton(onClick = { viewModel.refreshCurrentSourceWeb() }) {
                                             Icon(Icons.Default.Refresh, contentDescription = "Actualiser les tirages", tint = MaterialTheme.colorScheme.primary)
                                         }
+                                    }
+
+                                    // Bouton vers l'Analyste IA
+                                    IconButton(onClick = { currentTab = 5 }) {
+                                        Icon(
+                                            Icons.Default.AutoAwesome,
+                                            contentDescription = "Analyste IA & Clé API",
+                                            tint = if (currentTab == 5) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                        )
                                     }
 
                                     IconButton(onClick = { currentTab = 4 }) {
@@ -439,7 +480,16 @@ class MainActivity : ComponentActivity() {
                             )
                             1 -> NapScreen(
                                 napPackage = dailyNapPackage,
-                                onSaveForTracking = { viewModel.saveTodayNapPropositions() }
+                                onSaveForTracking = { viewModel.saveTodayNapPropositions() },
+                                userProposedNumbers = userProposedNumbers,
+                                userNumbersAnalysis = userNumbersAnalysis,
+                                userNumbersAiReport = userNumbersAiReport,
+                                isAnalyzingUserNumbersWithAi = isAnalyzingUserNumbersWithAi,
+                                onSubmitUserNumbers = { viewModel.submitUserNumbersInput(it) },
+                                onRemoveUserNumber = { viewModel.removeUserProposedNumber(it) },
+                                onClearUserNumbers = { viewModel.clearUserProposedNumbers() },
+                                onRequestAiAnalysisForUserNumbers = { viewModel.requestAiAnalysisForUserNumbers() },
+                                onSaveUserNumbersForTracking = { viewModel.saveUserProposedNumbersForTracking() }
                             )
                             2 -> StatsScreen(
                                 stats = numberStats,
@@ -448,7 +498,18 @@ class MainActivity : ComponentActivity() {
                                 topTrios = topTrios,
                                 chiSquareResult = chiSquareResult,
                                 selectedNumberForCurve = selectedNumberForCurve,
-                                onSelectNumberForCurve = { viewModel.selectNumberForCurve(it) }
+                                onSelectNumberForCurve = { viewModel.selectNumberForCurve(it) },
+                                frequencies01To90 = numberFrequencies01To90,
+                                onRecalculateFrequencies01To90 = { viewModel.calculateNumberFrequencies01To90() },
+                                pairsAndTriosAnalysis = pairsAndTriosAnalysis,
+                                pairTrioLimit = pairTrioLimit,
+                                onSelectPairTrioLimit = { viewModel.updatePairTrioLimit(it) },
+                                onRecalculatePairsAndTrios = { viewModel.analyzePairsAndTriosFromHistory() },
+                                gapAndColdAnalysis = gapAndColdAnalysis,
+                                recentWindowSize = recentWindowSize,
+                                onSelectRecentWindowSize = { viewModel.updateRecentWindowSize(it) },
+                                onRecalculateGapsAndCold = { viewModel.calculateGapsAndLeastRecentFromHistory() },
+                                onRecalculateChiSquare = { viewModel.runChiSquareEquityTestFromHistory() }
                             )
                             3 -> TrackingScreen(
                                 trackedCombinations = allTrackedCombinations,
@@ -469,6 +530,20 @@ class MainActivity : ComponentActivity() {
                                 onDeleteSource = { viewModel.deleteSource(it) },
                                 onRefreshSource = { viewModel.refreshCurrentSourceWeb() },
                                 onResetSampleData = { viewModel.resetSampleData() }
+                            )
+                            5 -> AiScreen(
+                                customApiKey = customApiKey,
+                                isKeyConfigured = isApiKeyConfigured,
+                                isAiGenerating = isAiGenerating,
+                                isAiEvaluating = isAiEvaluating,
+                                latestPrediction = latestAiPrediction,
+                                aiEvaluations = aiEvaluations,
+                                latestDraw = draws.firstOrNull(),
+                                onSaveApiKey = { viewModel.saveCustomApiKey(it) },
+                                onClearApiKey = { viewModel.clearCustomApiKey() },
+                                onGeneratePrediction = { viewModel.generateAiPrediction() },
+                                onEvaluateLatestDraw = { viewModel.evaluateLatestDrawWithAi() },
+                                onDeleteEvaluation = { viewModel.deleteAiEvaluation(it) }
                             )
                         }
                     }
