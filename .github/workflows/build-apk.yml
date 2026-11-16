@@ -48,26 +48,42 @@ jobs:
       # --- Branche Android natif Kotlin / Gradle (dépôt actuel sans pubspec.yaml) ---
       - name: Set up Android SDK
         if: hashFiles('pubspec.yaml') == ''
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+
+      - name: Accept Android SDK licenses & install API 36 packages
+        if: hashFiles('pubspec.yaml') == ''
+        run: |
+          SDK_DIR="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          SDK_MANAGER="$SDK_DIR/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDK_MANAGER" ]; then
+            SDK_MANAGER="$(command -v sdkmanager || true)"
+          fi
+          if [ -n "$SDK_MANAGER" ]; then
+            yes | "$SDK_MANAGER" --licenses > /dev/null 2>&1 || true
+            "$SDK_MANAGER" "platform-tools" "platforms;android-36" "build-tools;36.0.0" || true
+            "$SDK_MANAGER" "platforms;android-36.1" || true
+          fi
 
       - name: Set up Gradle
         if: hashFiles('pubspec.yaml') == ''
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.3.1'
+          validate-wrappers: false
 
       - name: Prepare debug keystore
         if: hashFiles('pubspec.yaml') == ''
         run: |
-          if [ -f debug.keystore.base64 ] && [ ! -f debug.keystore ]; then
-            base64 -d debug.keystore.base64 > debug.keystore
-          elif [ ! -f debug.keystore ]; then
+          if [ -f debug.keystore.base64 ] && [ ! -s debug.keystore ]; then
+            base64 -d debug.keystore.base64 > debug.keystore || rm -f debug.keystore
+          fi
+          if [ ! -s debug.keystore ]; then
             keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
           fi
 
       - name: Build Android Debug APK (Kotlin/Gradle)
         if: hashFiles('pubspec.yaml') == ''
-        run: gradle :app:assembleDebug --no-daemon
+        run: gradle :app:assembleDebug --no-daemon --no-configuration-cache -Dorg.gradle.jvmargs="-Xmx3g -Dfile.encoding=UTF-8" --stacktrace
 
       - name: Upload Android APK artifact
         if: hashFiles('pubspec.yaml') == ''
